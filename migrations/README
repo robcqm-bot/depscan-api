@@ -1,0 +1,8 @@
+Alembic migrations for DepScan API.
+
+Fase 0 uses create_all() on startup — no migrations needed.
+For production upgrades, initialize alembic:
+
+    alembic init migrations
+    alembic revision --autogenerate -m "initial schema"
+    alembic upgrade head
