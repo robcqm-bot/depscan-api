@@ -21,7 +21,12 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("DepScan API starting...")
-    await create_tables()
+    try:
+        await create_tables()
+    except Exception as e:
+        # With multiple workers, a sibling process may have already created
+        # the tables — that's fine, continue normally.
+        logger.info(f"Tables already exist or concurrent init: {e}")
     yield
     logger.info("DepScan API shutting down...")
     await close_redis()
