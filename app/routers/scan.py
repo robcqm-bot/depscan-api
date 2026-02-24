@@ -1,4 +1,4 @@
-"""Scan router: POST /v1/scan-deps, GET /v1/health, POST /v1/admin/create-key."""
+"""Scan router: POST /v1/scan-deps, GET /v1/scan/{scan_id}, GET /v1/health, POST /v1/admin/create-key."""
 
 import hashlib
 import hmac
@@ -10,6 +10,8 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Header
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -17,7 +19,7 @@ from app.database import get_db
 from app.dependencies import get_api_key
 from app.middleware.rate_limit import check_rate_limit
 from app.models.db import APIKey, EndpointResultDB, Scan
-from app.models.scan import AIInsight, ScanRequest, ScanResponse
+from app.models.scan import AIInsight, EndpointResult, ScanRequest, ScanResponse
 from app.services import scorer
 from app.services.ai_insights import get_insight_generator
 from app.services.checker import run_scan
@@ -40,18 +42,13 @@ async def scan_deps(
     api_key: APIKey = Depends(get_api_key),
     db: AsyncSession = Depends(get_db),
 ):
-    if request.scan_type == "deep":
-        raise HTTPException(
-            status_code=501,
-            detail={
-                "error": "Deep scan not yet available (Fase 1)",
-                "code": "NOT_IMPLEMENTED",
-            },
-        )
-
     await check_rate_limit(api_key.id, api_key.tier)
 
-    urls = extract_urls(skill_url=request.skill_url, endpoints=request.endpoints)
+    urls = await extract_urls(
+        skill_url=request.skill_url,
+        endpoints=request.endpoints,
+        scan_type=request.scan_type,
+    )
     if not urls:
         raise HTTPException(
             status_code=400,
@@ -139,6 +136,58 @@ async def scan_deps(
         timestamp=datetime.now(timezone.utc),
         processing_time_ms=processing_ms,
         ai_insight=ai_insight,
+    )
+
+
+@router.get("/v1/scan/{scan_id}", response_model=ScanResponse)
+async def get_scan(
+    scan_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Retrieve a previously completed scan by its scan_id."""
+    stmt = (
+        select(Scan)
+        .where(Scan.scan_id == scan_id)
+        .options(selectinload(Scan.endpoint_results))
+    )
+    result = await db.execute(stmt)
+    scan = result.scalar_one_or_none()
+
+    if scan is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "Scan not found", "code": "SCAN_NOT_FOUND"},
+        )
+
+    # Reconstruct EndpointResult list from DB rows
+    endpoints = [
+        EndpointResult(
+            url=row.url,
+            status=row.status,
+            latency_ms=row.latency_ms,
+            ssl_expires_days=row.ssl_expires_days,
+            ssl_valid=row.ssl_valid,
+            domain_age_days=row.domain_age_days,
+            domain_owner_changed=row.domain_owner_changed,
+            abuse_score=row.abuse_score,
+            in_blacklist=row.in_blacklist,
+            flags=json.loads(row.flags) if row.flags else [],
+            score=row.score,
+        )
+        for row in scan.endpoint_results
+    ]
+
+    return ScanResponse(
+        scan_id=scan.scan_id,
+        skill=scan.skill_url,
+        overall_score=scan.overall_score or 0,
+        status=scan.scan_status or "UNKNOWN",
+        endpoints=endpoints,
+        recommendation=scan.recommendation or "REVIEW_BEFORE_INSTALL",
+        scan_type=scan.scan_type,
+        timestamp=scan.completed_at or scan.created_at,
+        processing_time_ms=scan.processing_time_ms or 0,
+        ai_insight=None,  # not persisted in DB
     )
 
 

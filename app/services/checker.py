@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 from app.cache import get_cached, set_cached
 from app.models.scan import EndpointResult
 from app.services import blacklist as blacklist_svc
+from app.services import domain_rep as domain_rep_svc
 from app.services import scorer
 from app.services import ssl_check as ssl_svc
 from app.services import uptime as uptime_svc
@@ -15,12 +16,14 @@ from app.services.extractor import validate_public_url
 
 logger = logging.getLogger(__name__)
 
-CACHE_TTL_SECONDS = 3600  # 1 hour (Fase 0)
+SINGLE_CACHE_TTL = 3600   # 1 hour for single scans
+DEEP_CACHE_TTL = 86400    # 24 hours for deep scans (WHOIS data is stable)
 
 
 async def check_endpoint(url: str, scan_type: str = "single") -> EndpointResult:
     """Run all checks for a single endpoint; uses Redis cache."""
-    cache_key = f"depscan:endpoint:{url}"
+    cache_key = f"depscan:endpoint:{scan_type}:{url}"
+    cache_ttl = DEEP_CACHE_TTL if scan_type == "deep" else SINGLE_CACHE_TTL
 
     # SSRF prevention — block private/internal addresses before any HTTP request
     try:
@@ -42,12 +45,21 @@ async def check_endpoint(url: str, scan_type: str = "single") -> EndpointResult:
         except Exception:
             pass  # stale/corrupt cache — recheck
 
-    # Run checks in parallel
-    uptime_result, ssl_result, blacklist_result = await asyncio.gather(
-        uptime_svc.check_uptime(url),
-        ssl_svc.check_ssl(url),
-        blacklist_svc.check_blacklist(url),
-    )
+    # Run checks in parallel — deep scan adds domain reputation
+    if scan_type == "deep":
+        uptime_result, ssl_result, blacklist_result, domain_result = await asyncio.gather(
+            uptime_svc.check_uptime(url),
+            ssl_svc.check_ssl(url),
+            blacklist_svc.check_blacklist(url),   # includes abuse_score
+            domain_rep_svc.get_domain_rep(url),   # WHOIS age + owner change
+        )
+    else:
+        uptime_result, ssl_result, blacklist_result = await asyncio.gather(
+            uptime_svc.check_uptime(url),
+            ssl_svc.check_ssl(url),
+            blacklist_svc.check_blacklist(url),
+        )
+        domain_result = {"age_days": None, "owner_changed": None}
 
     # Determine effective status
     status = uptime_result["status"]
@@ -63,9 +75,9 @@ async def check_endpoint(url: str, scan_type: str = "single") -> EndpointResult:
         latency_ms=uptime_result.get("latency_ms"),
         ssl_expires_days=ssl_result.get("ssl_expires_days"),
         ssl_valid=ssl_result.get("ssl_valid"),
-        domain_age_days=None,       # Fase 1: WHOIS
-        domain_owner_changed=None,  # Fase 1: WHOIS
-        abuse_score=0,              # Fase 1: AbuseIPDB
+        domain_age_days=domain_result.get("age_days"),
+        domain_owner_changed=domain_result.get("owner_changed"),
+        abuse_score=blacklist_result.get("abuse_score", 0),
         in_blacklist=blacklist_result.get("in_blacklist", False),
         flags=[],
         score=50,
@@ -84,7 +96,7 @@ async def check_endpoint(url: str, scan_type: str = "single") -> EndpointResult:
     result.score = scorer.calculate_endpoint_score(result)
 
     # Cache result
-    await set_cached(cache_key, result.model_dump_json(), ttl=CACHE_TTL_SECONDS)
+    await set_cached(cache_key, result.model_dump_json(), ttl=cache_ttl)
 
     return result
 

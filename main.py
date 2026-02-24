@@ -1,6 +1,7 @@
 import logging
 from contextlib import asynccontextmanager
 
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -10,6 +11,7 @@ from app.database import create_tables
 from app.routers import billing as billing_router
 from app.routers import monitor as monitor_router
 from app.routers import scan as scan_router
+from app.tasks.monitor_job import run_monitor_job
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,7 +29,22 @@ async def lifespan(app: FastAPI):
         # With multiple workers, a sibling process may have already created
         # the tables — that's fine, continue normally.
         logger.info(f"Tables already exist or concurrent init: {e}")
+
+    settings = get_settings()
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(
+        run_monitor_job,
+        "interval",
+        hours=settings.monitor_scan_interval_hours,
+        id="monitor_job",
+        replace_existing=True,
+    )
+    scheduler.start()
+    logger.info(f"Monitor scheduler started (interval={settings.monitor_scan_interval_hours}h)")
+
     yield
+
+    scheduler.shutdown(wait=False)
     logger.info("DepScan API shutting down...")
     await close_redis()
 

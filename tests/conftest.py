@@ -36,6 +36,7 @@ def client():
     with (
         patch("main.create_tables", new=AsyncMock()),
         patch("app.cache.get_redis", new=AsyncMock()),
+        patch("main.AsyncIOScheduler"),  # prevent scheduler from starting in tests
     ):
         with TestClient(app, raise_server_exceptions=False) as c:
             yield c

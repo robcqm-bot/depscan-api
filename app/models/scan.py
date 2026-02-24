@@ -50,6 +50,54 @@ class ScanResponse(BaseModel):
     ai_insight: Optional[AIInsight] = None  # present when DEEPSEEK_API_KEY is configured
 
 
+class MonitorSubscribeRequest(BaseModel):
+    skill_url: Optional[str] = None
+    endpoints: Optional[List[str]] = None
+    webhook_url: Optional[str] = None
+    alert_threshold: int = 20
+
+    @model_validator(mode="after")
+    def must_have_source(self):
+        if not self.endpoints and not self.skill_url:
+            raise ValueError("Se requiere skill_url o endpoints")
+        return self
+
+
+class MonitorSubscribeResponse(BaseModel):
+    subscription_id: str
+    status: str
+    skill_url: Optional[str]
+    endpoints: List[str]
+    webhook_url: Optional[str]
+    alert_threshold: int
+    next_check_at: datetime
+    created_at: datetime
+
+
+class AlertRecord(BaseModel):
+    previous_score: int
+    new_score: int
+    scan_id: str
+    webhook_status: str
+    created_at: datetime
+
+
+class MonitorHistoryEntry(BaseModel):
+    scan_id: str
+    overall_score: int
+    status: str
+    timestamp: datetime
+    alerts: List[AlertRecord] = []
+
+
+class MonitorHistoryResponse(BaseModel):
+    subscription_id: str
+    skill_url: Optional[str]
+    current_status: str
+    last_score: Optional[int]
+    history: List[MonitorHistoryEntry]
+
+
 class CheckoutRequest(BaseModel):
     tier: Literal["single", "deep"] = "single"
     quantity: int = 10

@@ -1,15 +1,24 @@
 [Unit]
 Description=DepScan API
 After=network.target postgresql.service redis.service
+Wants=postgresql.service redis.service
 
 [Service]
-Type=simple
-User=root
+User=www-data
+Group=www-data
 WorkingDirectory=/opt/depscan-api
 EnvironmentFile=/opt/depscan-api/.env
-ExecStart=/opt/depscan-api/venv/bin/uvicorn main:app --host 127.0.0.1 --port 8001 --workers 2
+ExecStart=/opt/depscan-api/venv/bin/uvicorn main:app --host 127.0.0.1 --port 8001 --workers 2 --log-level info --access-log --no-use-colors
+ExecReload=/bin/kill -HUP 
+KillMode=mixed
+TimeoutStopSec=30
 Restart=always
 RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/depscan-api
 
 [Install]
 WantedBy=multi-user.target

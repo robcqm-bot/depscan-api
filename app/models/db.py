@@ -6,6 +6,49 @@ from sqlalchemy.orm import relationship
 from app.database import Base
 
 
+class Subscription(Base):
+    __tablename__ = "subscriptions"
+
+    id = Column(Integer, primary_key=True)
+    subscription_id = Column(String(40), unique=True, nullable=False, index=True)  # mon_ + uuid4.hex
+    api_key_id = Column(Integer, ForeignKey("api_keys.id"), nullable=False)
+    skill_url = Column(Text, nullable=True)
+    endpoints_json = Column(Text, nullable=False, default="[]")  # JSON-encoded list
+    webhook_url = Column(Text, nullable=True)
+    alert_threshold = Column(Integer, nullable=False, default=20)
+    last_score = Column(Integer, nullable=True)
+    last_scan_id = Column(String(40), nullable=True)
+    # active / paused (no credits) / cancelled
+    status = Column(String(20), nullable=False, default="active")
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
+    next_check_at = Column(DateTime(timezone=True), nullable=True)
+
+    api_key = relationship("APIKey")
+    alerts = relationship("AlertHistory", back_populates="subscription")
+
+
+class AlertHistory(Base):
+    __tablename__ = "alert_history"
+
+    id = Column(Integer, primary_key=True)
+    subscription_id = Column(Integer, ForeignKey("subscriptions.id"), nullable=False)
+    previous_score = Column(Integer, nullable=False)
+    new_score = Column(Integer, nullable=False)
+    scan_id = Column(String(40), nullable=False)
+    webhook_url = Column(Text, nullable=True)
+    # sent / failed / no_webhook
+    webhook_status = Column(String(20), nullable=False, default="pending")
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    subscription = relationship("Subscription", back_populates="alerts")
+
+
 class APIKey(Base):
     __tablename__ = "api_keys"
 
