@@ -89,7 +89,7 @@ def test_checkout_invalid_tier(client: TestClient):
 
 def test_webhook_without_signature(client: TestClient):
     response = client.post(
-        "/v1/webhook/stripe",
+        "/v1/webhook/billing",
         content=b"{}",
         headers={"Content-Type": "application/json"},
     )

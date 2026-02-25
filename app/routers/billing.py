@@ -33,7 +33,7 @@ async def create_checkout(
     request: CheckoutRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """Create a Stripe checkout session and return a pending API key."""
+    """Create a payment session and return a pending API key."""
     settings = get_settings()
     _init_stripe()
 
@@ -90,17 +90,17 @@ async def create_checkout(
         logger.error(f"Stripe error creating checkout: {e}")
         raise HTTPException(
             status_code=503,
-            detail={"error": "Payment provider error", "code": "STRIPE_ERROR"},
+            detail={"error": "Payment provider error", "code": "PAYMENT_ERROR"},
         )
 
 
-@router.post("/v1/webhook/stripe", status_code=200)
+@router.post("/v1/webhook/billing", status_code=200, include_in_schema=False)
 async def stripe_webhook(
     request: Request,
     stripe_signature: str = Header(None, alias="stripe-signature"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Receive Stripe events and activate API keys after payment."""
+    """Internal webhook — not part of the public API."""
     settings = get_settings()
     _init_stripe()
 
