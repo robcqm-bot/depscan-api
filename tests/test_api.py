@@ -262,3 +262,142 @@ def test_get_scan_found():
     assert len(data["endpoints"]) == 1
     assert data["endpoints"][0]["url"] == "https://api.github.com"
     assert data["ai_insight"] is None
+
+
+# ---------------------------------------------------------------------------
+# POST /internal/scan-deps — Fase 3
+# ---------------------------------------------------------------------------
+
+def test_internal_blocked_from_external_ip(client: TestClient):
+    """POST /internal/scan-deps desde IP no-localhost → 403 FORBIDDEN."""
+    # TestClient usa 127.0.0.1 por defecto, así que tenemos que forzar una IP externa
+    from main import app
+    from app.dependencies import require_localhost
+
+    async def mock_require_localhost_fail():
+        from fastapi import HTTPException, status
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"error": "Internal endpoint — localhost only", "code": "FORBIDDEN"},
+        )
+
+    app.dependency_overrides[require_localhost] = mock_require_localhost_fail
+
+    with (
+        patch("main.create_tables", new=AsyncMock()),
+        patch("app.cache.get_redis", new=AsyncMock()),
+        patch("main.AsyncIOScheduler"),
+    ):
+        with TestClient(app, raise_server_exceptions=False) as c:
+            response = c.post(
+                "/internal/scan-deps",
+                json={"endpoints": ["https://api.github.com"]},
+            )
+
+    app.dependency_overrides.clear()
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "FORBIDDEN"
+
+
+def test_internal_allowed_from_localhost():
+    """POST /internal/scan-deps desde localhost → 200 con ScanResponse, sin auth."""
+    from app.database import get_db
+    from app.dependencies import require_localhost
+    from app.models.scan import EndpointResult
+    from main import app
+
+    endpoint_result = EndpointResult(
+        url="https://api.github.com",
+        status="UP",
+        latency_ms=80,
+        ssl_expires_days=200,
+        ssl_valid=True,
+        domain_age_days=5000,
+        domain_owner_changed=False,
+        abuse_score=0,
+        in_blacklist=False,
+        flags=[],
+        score=100,
+    )
+
+    async def mock_db():
+        session = AsyncMock()
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = None
+        session.execute = AsyncMock(return_value=result)
+        session.add = MagicMock()
+        session.flush = AsyncMock()
+        session.commit = AsyncMock()
+        yield session
+
+    app.dependency_overrides[get_db] = mock_db
+    app.dependency_overrides[require_localhost] = lambda: None  # localhost ok
+
+    with (
+        patch("main.create_tables", new=AsyncMock()),
+        patch("app.cache.get_redis", new=AsyncMock()),
+        patch("main.AsyncIOScheduler"),
+        patch("app.routers.internal.run_scan", new=AsyncMock(return_value=[endpoint_result])),
+        patch("app.routers.internal.extract_urls", new=AsyncMock(return_value=["https://api.github.com"])),
+        patch("app.routers.internal.get_insight_generator") as mock_ig,
+    ):
+        mock_ig.return_value.analyze = AsyncMock(return_value=None)
+        with TestClient(app, raise_server_exceptions=False) as c:
+            # Sin header Authorization
+            response = c.post(
+                "/internal/scan-deps",
+                json={"endpoints": ["https://api.github.com"]},
+            )
+
+    app.dependency_overrides.clear()
+    assert response.status_code == 200
+    data = response.json()
+    assert data["overall_score"] == 100
+    assert data["status"] == "SAFE"
+    assert data["recommendation"] == "SAFE_TO_INSTALL"
+    assert len(data["endpoints"]) == 1
+
+
+def test_internal_no_auth_required():
+    """POST /internal/scan-deps no falla por falta de Authorization header."""
+    from app.database import get_db
+    from app.dependencies import require_localhost
+    from app.models.scan import EndpointResult
+    from main import app
+
+    endpoint_result = EndpointResult(
+        url="https://example.com", status="UP", score=90, flags=[]
+    )
+
+    async def mock_db():
+        session = AsyncMock()
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = None
+        session.execute = AsyncMock(return_value=result)
+        session.add = MagicMock()
+        session.flush = AsyncMock()
+        session.commit = AsyncMock()
+        yield session
+
+    app.dependency_overrides[get_db] = mock_db
+    app.dependency_overrides[require_localhost] = lambda: None
+
+    with (
+        patch("main.create_tables", new=AsyncMock()),
+        patch("app.cache.get_redis", new=AsyncMock()),
+        patch("main.AsyncIOScheduler"),
+        patch("app.routers.internal.run_scan", new=AsyncMock(return_value=[endpoint_result])),
+        patch("app.routers.internal.extract_urls", new=AsyncMock(return_value=["https://example.com"])),
+        patch("app.routers.internal.get_insight_generator") as mock_ig,
+    ):
+        mock_ig.return_value.analyze = AsyncMock(return_value=None)
+        with TestClient(app, raise_server_exceptions=False) as c:
+            # Deliberadamente sin Authorization header
+            response = c.post(
+                "/internal/scan-deps",
+                json={"endpoints": ["https://example.com"]},
+            )
+
+    app.dependency_overrides.clear()
+    # No debe ser 401 — el endpoint no requiere auth
+    assert response.status_code == 200

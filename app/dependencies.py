@@ -4,7 +4,7 @@ import hashlib
 import logging
 from typing import Optional
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,6 +12,16 @@ from app.database import get_db
 from app.models.db import APIKey
 
 logger = logging.getLogger(__name__)
+
+
+async def require_localhost(request: Request) -> None:
+    """Permite solo requests desde 127.0.0.1 — para uso interno entre servicios."""
+    client_ip = request.client.host if request.client else ""
+    if client_ip != "127.0.0.1":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"error": "Internal endpoint — localhost only", "code": "FORBIDDEN"},
+        )
 
 
 async def get_api_key(

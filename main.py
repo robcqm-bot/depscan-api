@@ -9,6 +9,7 @@ from app.cache import close_redis
 from app.config import get_settings
 from app.database import create_tables
 from app.routers import billing as billing_router
+from app.routers import internal as internal_router
 from app.routers import monitor as monitor_router
 from app.routers import scan as scan_router
 from app.tasks.monitor_job import run_monitor_job
@@ -76,6 +77,7 @@ def create_app() -> FastAPI:
     app.include_router(scan_router.router)
     app.include_router(billing_router.router)
     app.include_router(monitor_router.router)
+    app.include_router(internal_router.router)
 
     return app
 
