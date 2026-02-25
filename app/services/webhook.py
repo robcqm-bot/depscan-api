@@ -16,12 +16,17 @@ async def send_alert(webhook_url: str, payload: Dict[str, Any]) -> bool:
     Never raises — failures are logged as warnings.
     """
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=5.0, read=10.0, write=10.0, pool=5.0),
+            limits=httpx.Limits(max_connections=10, max_keepalive_connections=0),
+        ) as client:
             response = await client.post(
                 webhook_url,
                 json=payload,
                 headers={"Content-Type": "application/json", "User-Agent": "DepScan-Monitor/1.0"},
             )
+            # Discard body — we only care about the status code
+            await response.aread()
             if response.is_success:
                 logger.info(f"Webhook sent to {webhook_url}: HTTP {response.status_code}")
                 return True
@@ -29,7 +34,7 @@ async def send_alert(webhook_url: str, payload: Dict[str, Any]) -> bool:
                 logger.warning(f"Webhook non-2xx for {webhook_url}: HTTP {response.status_code}")
                 return False
     except Exception as exc:
-        logger.warning(f"Webhook delivery failed for {webhook_url}: {exc}")
+        logger.warning(f"Webhook delivery failed for {webhook_url}: {type(exc).__name__}")
         return False
 
 

@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Header
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -77,9 +77,21 @@ async def scan_deps(
     # Run all checks concurrently
     endpoint_results = await run_scan(urls, request.scan_type)
 
-    # Deduct one credit
-    api_key.credits_remaining -= 1
-    api_key.last_used_at = datetime.now(timezone.utc)
+    # Deduct one credit atomically — prevents double-spend under concurrent requests
+    deduct_result = await db.execute(
+        update(APIKey)
+        .where(APIKey.id == api_key.id, APIKey.credits_remaining > 0)
+        .values(
+            credits_remaining=APIKey.credits_remaining - 1,
+            last_used_at=datetime.now(timezone.utc),
+        )
+        .returning(APIKey.credits_remaining)
+    )
+    if deduct_result.scalar_one_or_none() is None:
+        raise HTTPException(
+            status_code=402,
+            detail={"error": "Insufficient credits", "code": "CREDITS_EXHAUSTED"},
+        )
 
     # Calculate overall score
     scores = [r.score for r in endpoint_results]
@@ -142,9 +154,11 @@ async def scan_deps(
 @router.get("/v1/scan/{scan_id}", response_model=ScanResponse)
 async def get_scan(
     scan_id: str,
+    api_key: APIKey = Depends(get_api_key),
     db: AsyncSession = Depends(get_db),
 ):
-    """Retrieve a previously completed scan by its scan_id."""
+    """Retrieve a previously completed scan by its scan_id. Requires owner's API key."""
+    await check_rate_limit(api_key.id, api_key.tier)
     stmt = (
         select(Scan)
         .where(Scan.scan_id == scan_id)
@@ -157,6 +171,12 @@ async def get_scan(
         raise HTTPException(
             status_code=404,
             detail={"error": "Scan not found", "code": "SCAN_NOT_FOUND"},
+        )
+
+    if scan.api_key_id != api_key.id:
+        raise HTTPException(
+            status_code=403,
+            detail={"error": "Not your scan", "code": "FORBIDDEN"},
         )
 
     # Reconstruct EndpointResult list from DB rows
@@ -204,10 +224,13 @@ async def admin_create_key(
 ):
     """Create an active API key for testing/admin use. Protected by X-Admin-Secret header."""
     settings = get_settings()
-    # Constant-time comparison to prevent timing attacks
-    provided = (x_admin_secret or "").encode()
+    # Constant-time comparison to prevent timing attacks.
+    # Deny immediately if no secret is provided in the request.
+    if not x_admin_secret:
+        raise HTTPException(status_code=403, detail={"error": "Forbidden", "code": "FORBIDDEN"})
+    provided = x_admin_secret.encode()
     expected = settings.secret_key.encode()
-    if not settings.secret_key or not hmac.compare_digest(provided, expected):
+    if not hmac.compare_digest(provided, expected):
         raise HTTPException(status_code=403, detail={"error": "Forbidden", "code": "FORBIDDEN"})
 
     if tier not in _VALID_TIERS:
@@ -229,4 +252,8 @@ async def admin_create_key(
     await db.commit()
     await db.refresh(api_key)
 
+    logger.info(
+        "admin_key_created key_id=%s tier=%s credits=%s",
+        api_key.id, tier, credits,
+    )
     return {"api_key": raw_key, "tier": tier, "credits": credits, "id": api_key.id}

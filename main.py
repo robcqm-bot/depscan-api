@@ -65,9 +65,12 @@ def create_app() -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=[
+            "https://depscan.net",
+            "https://www.depscan.net",
+        ],
         allow_methods=["GET", "POST", "DELETE"],
-        allow_headers=["*"],
+        allow_headers=["Authorization", "Content-Type"],
     )
 
     app.include_router(scan_router.router)

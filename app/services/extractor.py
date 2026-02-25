@@ -94,12 +94,12 @@ async def fetch_manifest_urls(skill_url: str) -> List[str]:
         return [skill_url]
 
     try:
-        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True, max_redirects=5) as client:
             response = await client.get(skill_url)
             response.raise_for_status()
             content = response.text
     except Exception as exc:
-        logger.warning(f"Manifest fetch failed for {skill_url}: {exc}")
+        logger.warning(f"Manifest fetch failed for {skill_url}: {type(exc).__name__}")
         return [skill_url]
 
     # Try YAML first (superset of JSON), then plain JSON

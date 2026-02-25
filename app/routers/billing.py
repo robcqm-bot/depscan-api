@@ -127,24 +127,32 @@ async def stripe_webhook(
 
     if event_type == "checkout.session.completed":
         session = event["data"]["object"]
-        metadata = session.get("metadata", {})
-        api_key_id = metadata.get("api_key_id")
-        credits = int(metadata.get("credits", 0))
+        metadata = session.get("metadata", {}) or {}
+        try:
+            api_key_id = int(metadata.get("api_key_id", 0))
+            credits = int(metadata.get("credits", 0))
+        except (ValueError, TypeError):
+            logger.error(f"Stripe webhook: invalid metadata types — {metadata}")
+            return {"received": True}
 
-        if api_key_id:
-            result = await db.execute(
-                select(APIKey).where(APIKey.id == int(api_key_id))
-            )
-            api_key = result.scalar_one_or_none()
-            if api_key:
-                api_key.status = "active"
-                api_key.credits_remaining += credits
-                api_key.stripe_customer_id = session.get("customer")
-                await db.commit()
-                logger.info(f"API key {api_key_id} activated — {credits} credits added")
+        if api_key_id <= 0 or credits <= 0 or credits > 10_000:
+            logger.error(f"Stripe webhook: out-of-range values api_key_id={api_key_id} credits={credits}")
+            return {"received": True}
+
+        result = await db.execute(
+            select(APIKey).where(APIKey.id == api_key_id)
+        )
+        api_key = result.scalar_one_or_none()
+        if api_key:
+            api_key.status = "active"
+            api_key.credits_remaining += credits
+            api_key.stripe_customer_id = session.get("customer")
+            await db.commit()
+            logger.info(f"API key {api_key_id} activated — {credits} credits added")
 
     elif event_type == "invoice.payment_failed":
-        logger.warning(f"Payment failed: {event['data']['object'].get('customer')}")
+        customer = event["data"]["object"].get("customer", "unknown")
+        logger.warning("stripe_payment_failed customer=%s", customer)
 
     elif event_type == "customer.subscription.deleted":
         customer_id = event["data"]["object"].get("customer")

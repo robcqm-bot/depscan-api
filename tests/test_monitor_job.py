@@ -35,19 +35,31 @@ def _make_subscription(
     return sub, api_key
 
 
-def _build_session_mock(subscriptions):
-    """Build an AsyncMock DB session that returns the given subscription list."""
+def _build_session_mock(subscriptions, credits_remaining_after_deduct=9):
+    """Build an AsyncMock DB session that returns the given subscription list.
+
+    The first execute() call returns the subscription list (scalars().all()).
+    Subsequent execute() calls simulate the atomic UPDATE RETURNING, returning
+    `credits_remaining_after_deduct` (or None to simulate exhausted credits).
+    """
     session = AsyncMock()
     session.add = MagicMock()
     session.flush = AsyncMock()
     session.commit = AsyncMock()
     session.rollback = AsyncMock()
 
-    result = MagicMock()
+    # First call: SELECT subscriptions
+    list_result = MagicMock()
     scalars = MagicMock()
     scalars.all.return_value = subscriptions
-    result.scalars.return_value = scalars
-    session.execute = AsyncMock(return_value=result)
+    list_result.scalars.return_value = scalars
+
+    # Subsequent calls: UPDATE RETURNING credits_remaining
+    deduct_result = MagicMock()
+    deduct_result.scalar_one_or_none.return_value = credits_remaining_after_deduct
+
+    execute_effects = [list_result] + [deduct_result] * max(1, len(subscriptions))
+    session.execute = AsyncMock(side_effect=execute_effects)
 
     # Context manager support (async with session_maker() as db)
     cm = AsyncMock()
@@ -95,7 +107,7 @@ async def test_job_no_alert_when_no_previous_score():
 
     # Subscription last_score should be updated
     assert sub.last_score == 75
-    assert api_key.credits_remaining == 4  # 1 credit deducted
+    # Credit deduction is atomic via DB UPDATE — api_key object not modified in Python
 
 
 @pytest.mark.asyncio
@@ -233,9 +245,10 @@ async def test_job_no_webhook_status_when_no_webhook_url():
 
 @pytest.mark.asyncio
 async def test_job_pauses_subscription_when_credits_exhausted():
-    """After deducting the last credit, subscription status → 'paused'."""
+    """After deducting the last credit (UPDATE RETURNING returns 0), sub → 'paused'."""
     sub, api_key = _make_subscription(last_score=None, credits=1)
-    session, session_maker = _build_session_mock([sub])
+    # Simulate DB returning 0 credits after atomic deduction
+    session, session_maker = _build_session_mock([sub], credits_remaining_after_deduct=0)
 
     endpoint_result = _make_endpoint_result(score=80)
 
@@ -252,7 +265,7 @@ async def test_job_pauses_subscription_when_credits_exhausted():
         from app.tasks.monitor_job import run_monitor_job
         await run_monitor_job()
 
-    assert api_key.credits_remaining == 0
+    # DB returned 0 remaining → subscription should be paused
     assert sub.status == "paused"
 
 

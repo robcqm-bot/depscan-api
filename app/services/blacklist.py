@@ -72,9 +72,16 @@ async def _check_abuseipdb(domain: str) -> int:
             )
             response.raise_for_status()
             data = response.json()
-            return int(data.get("data", {}).get("abuseConfidenceScore", 0))
+            if not isinstance(data, dict):
+                logger.warning(f"AbuseIPDB unexpected response type for {domain}")
+                return 0
+            score = data.get("data", {}).get("abuseConfidenceScore", 0)
+            if not isinstance(score, (int, float)) or not (0 <= score <= 100):
+                logger.warning(f"AbuseIPDB invalid score value for {domain}: {score!r}")
+                return 0
+            return int(score)
     except Exception as exc:
-        logger.warning(f"AbuseIPDB check failed for {domain} ({ip}): {exc}")
+        logger.warning(f"AbuseIPDB check failed for {domain} ({ip}): {type(exc).__name__}")
         return 0
 
 

@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -9,6 +10,16 @@ class Settings(BaseSettings):
     app_env: str = "production"
     app_port: int = 8001
     secret_key: str = ""
+
+    @field_validator("secret_key")
+    @classmethod
+    def secret_key_must_be_set(cls, v: str) -> str:
+        if not v or len(v) < 32:
+            raise ValueError(
+                "SECRET_KEY must be set and at least 32 characters long. "
+                "Generate one with: python -c \"import secrets; print(secrets.token_hex(32))\""
+            )
+        return v
 
     database_url: str = ""
     redis_url: str = "redis://localhost:6379/1"

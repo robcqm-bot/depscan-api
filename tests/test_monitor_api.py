@@ -329,18 +329,20 @@ def test_unsubscribe_not_found():
 # ---------------------------------------------------------------------------
 
 def test_history_not_found(client: TestClient):
-    """Nonexistent subscription_id → 404."""
+    """Nonexistent subscription_id without auth → 401 (auth required now)."""
     response = client.get("/v1/monitor/mon_doesnotexist/history")
-    assert response.status_code == 404
-    assert response.json()["detail"]["code"] == "NOT_FOUND"
+    assert response.status_code == 401
 
 
 def test_history_empty():
-    """Found subscription with no history → 200 with empty history list."""
+    """Found subscription with no history → 200 with empty history list (owner auth)."""
     from app.database import get_db
+    from app.dependencies import get_api_key
     from main import app
 
-    sub = _make_subscription()
+    key_id = 10
+    owner_key = _make_key(tier="monitor", key_id=key_id)
+    sub = _make_subscription(api_key_id=key_id)
     sub.last_scan_id = None
     sub.alerts = []
 
@@ -361,6 +363,7 @@ def test_history_empty():
         yield session
 
     app.dependency_overrides[get_db] = mock_db
+    app.dependency_overrides[get_api_key] = lambda: owner_key
 
     with (
         patch("main.create_tables", new=AsyncMock()),
@@ -368,7 +371,10 @@ def test_history_empty():
         patch("main.AsyncIOScheduler"),
     ):
         with TestClient(app, raise_server_exceptions=False) as c:
-            response = c.get("/v1/monitor/mon_abc123/history")
+            response = c.get(
+                "/v1/monitor/mon_abc123/history",
+                headers={"Authorization": "Bearer dsk_live_testkey"},
+            )
 
     app.dependency_overrides.clear()
     assert response.status_code == 200
@@ -382,9 +388,12 @@ def test_history_empty():
 def test_history_with_scan_and_alert():
     """Subscription with one scan + one alert → history list has 1 entry with 1 alert."""
     from app.database import get_db
+    from app.dependencies import get_api_key
     from main import app
 
     now = datetime.now(timezone.utc)
+    key_id = 10
+    owner_key = _make_key(tier="monitor", key_id=key_id)
 
     alert = MagicMock()
     alert.scan_id = "dep_scan001"
@@ -393,7 +402,7 @@ def test_history_with_scan_and_alert():
     alert.webhook_status = "sent"
     alert.created_at = now
 
-    sub = _make_subscription()
+    sub = _make_subscription(api_key_id=key_id)
     sub.last_scan_id = "dep_scan001"
     sub.last_score = 45
     sub.alerts = [alert]
@@ -420,6 +429,7 @@ def test_history_with_scan_and_alert():
         yield session
 
     app.dependency_overrides[get_db] = mock_db
+    app.dependency_overrides[get_api_key] = lambda: owner_key
 
     with (
         patch("main.create_tables", new=AsyncMock()),
@@ -427,7 +437,10 @@ def test_history_with_scan_and_alert():
         patch("main.AsyncIOScheduler"),
     ):
         with TestClient(app, raise_server_exceptions=False) as c:
-            response = c.get("/v1/monitor/mon_abc123/history")
+            response = c.get(
+                "/v1/monitor/mon_abc123/history",
+                headers={"Authorization": "Bearer dsk_live_testkey"},
+            )
 
     app.dependency_overrides.clear()
     assert response.status_code == 200

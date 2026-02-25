@@ -10,6 +10,7 @@ import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import List
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
@@ -26,7 +27,7 @@ from app.models.scan import (
     MonitorSubscribeRequest,
     MonitorSubscribeResponse,
 )
-from app.services.extractor import extract_urls
+from app.services.extractor import extract_urls, validate_public_url
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -50,6 +51,22 @@ async def monitor_subscribe(
             },
         )
 
+    # Validate webhook_url: must be http/https and must not point to internal hosts (SSRF)
+    if request.webhook_url:
+        parsed_wh = urlparse(request.webhook_url)
+        if parsed_wh.scheme not in ("http", "https"):
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "webhook_url must use http or https scheme", "code": "INVALID_WEBHOOK_URL"},
+            )
+        try:
+            validate_public_url(request.webhook_url)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": f"webhook_url blocked: {exc}", "code": "INVALID_WEBHOOK_URL"},
+            )
+
     # Resolve URLs from skill_url or raw endpoints
     urls = await extract_urls(
         skill_url=request.skill_url,
@@ -60,6 +77,13 @@ async def monitor_subscribe(
         raise HTTPException(
             status_code=400,
             detail={"error": "No valid URLs to monitor", "code": "NO_URLS"},
+        )
+
+    # Limit endpoints per subscription (same cap as POST /v1/scan-deps)
+    if len(urls) > 50:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "Maximum 50 endpoints per subscription", "code": "TOO_MANY_URLS"},
         )
 
     subscription_id = f"mon_{uuid.uuid4().hex}"
@@ -122,9 +146,10 @@ async def monitor_unsubscribe(
 @router.get("/v1/monitor/{subscription_id}/history", response_model=MonitorHistoryResponse)
 async def monitor_history(
     subscription_id: str,
+    api_key: APIKey = Depends(get_api_key),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get scan history and alerts for a subscription. No auth required — ID is opaque."""
+    """Get scan history and alerts for a subscription. Requires owner's API key."""
     stmt = (
         select(Subscription)
         .where(Subscription.subscription_id == subscription_id)
@@ -137,6 +162,12 @@ async def monitor_history(
         raise HTTPException(
             status_code=404,
             detail={"error": "Subscription not found", "code": "NOT_FOUND"},
+        )
+
+    if sub.api_key_id != api_key.id:
+        raise HTTPException(
+            status_code=403,
+            detail={"error": "Not your subscription", "code": "FORBIDDEN"},
         )
 
     # Load scans linked to this subscription via last_scan_id references in alerts

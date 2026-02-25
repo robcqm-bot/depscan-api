@@ -188,17 +188,20 @@ def test_deep_scan_no_longer_returns_501(client: TestClient):
 # ---------------------------------------------------------------------------
 
 def test_get_scan_not_found(client: TestClient):
-    """GET /v1/scan/<unknown> → 404 with SCAN_NOT_FOUND code."""
+    """GET /v1/scan/<unknown> without auth → 401 (auth is now required)."""
     response = client.get("/v1/scan/dep_doesnotexist")
-    assert response.status_code == 404
-    assert response.json()["detail"]["code"] == "SCAN_NOT_FOUND"
+    assert response.status_code == 401
 
 
 def test_get_scan_found():
-    """GET /v1/scan/<known_id> → 200 with ScanResponse."""
+    """GET /v1/scan/<known_id> with owner's API key → 200 with ScanResponse."""
     from app.database import get_db
+    from app.dependencies import get_api_key
     from main import app
     from datetime import datetime, timezone
+
+    owner_key = _make_active_key()
+    owner_key.id = 42
 
     # Build mock DB scan row with endpoint_results
     mock_endpoint = MagicMock()
@@ -216,6 +219,7 @@ def test_get_scan_found():
 
     mock_scan = MagicMock()
     mock_scan.scan_id = "dep_abc123"
+    mock_scan.api_key_id = 42  # matches owner_key.id
     mock_scan.skill_url = None
     mock_scan.overall_score = 100
     mock_scan.scan_status = "SAFE"
@@ -234,13 +238,19 @@ def test_get_scan_found():
         yield session
 
     app.dependency_overrides[get_db] = mock_db
+    app.dependency_overrides[get_api_key] = lambda: owner_key
 
     with (
         patch("main.create_tables", new=AsyncMock()),
         patch("app.cache.get_redis", new=AsyncMock()),
+        patch("main.AsyncIOScheduler"),
+        patch("app.routers.scan.check_rate_limit", new=AsyncMock()),
     ):
         with TestClient(app, raise_server_exceptions=False) as c:
-            response = c.get("/v1/scan/dep_abc123")
+            response = c.get(
+                "/v1/scan/dep_abc123",
+                headers={"Authorization": "Bearer dsk_live_testkey"},
+            )
 
     app.dependency_overrides.clear()
 

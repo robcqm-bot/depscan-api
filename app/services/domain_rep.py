@@ -85,8 +85,11 @@ async def get_domain_rep(url: str) -> Dict[str, Any]:
             )
             response.raise_for_status()
             data = response.json()
+            if not isinstance(data, dict):
+                logger.warning(f"WHOIS unexpected response type for {domain}")
+                return {"age_days": None, "owner_changed": None}
     except Exception as exc:
-        logger.warning(f"WHOIS lookup failed for {domain}: {exc}")
+        logger.warning(f"WHOIS lookup failed for {domain}: {type(exc).__name__}")
         return {"age_days": None, "owner_changed": None}
 
     # whoisxmlapi wraps everything under "WhoisRecord"

@@ -4,10 +4,11 @@ import os
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-# Set a valid DATABASE_URL before any app import so the SQLAlchemy engine
-# URL parser doesn't fail on an empty string (tests never actually connect).
+# Set required env vars before any app import so Settings validation passes.
 if not os.environ.get("DATABASE_URL"):
     os.environ["DATABASE_URL"] = "postgresql+asyncpg://test:test@localhost/depscan_test"
+if not os.environ.get("SECRET_KEY"):
+    os.environ["SECRET_KEY"] = "test-secret-key-minimum-32-chars-long-for-tests"
 
 
 @pytest.fixture

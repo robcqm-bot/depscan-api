@@ -10,7 +10,7 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
 
 from app.cache import get_redis
@@ -59,7 +59,7 @@ async def run_monitor_job() -> None:
 
             await db.commit()
         except Exception as exc:
-            logger.error(f"monitor_job: unexpected error: {exc}", exc_info=True)
+            logger.error(f"monitor_job: unexpected error: {type(exc).__name__}: {exc}")
             await db.rollback()
 
     logger.info("monitor_job: done")
@@ -82,6 +82,7 @@ async def _process_subscription(db, sub: Subscription) -> None:
     if api_key.credits_remaining <= 0:
         logger.info(f"monitor_job: key id={api_key.id} no credits — pausing sub {sub.subscription_id}")
         sub.status = "paused"
+        await db.flush()
         return
 
     scan_id = f"dep_{uuid.uuid4().hex}"
@@ -168,10 +169,21 @@ async def _process_subscription(db, sub: Subscription) -> None:
     sub.last_scan_id = scan_id
     sub.next_check_at = now + timedelta(hours=6)
 
-    # Deduct 1 credit
-    api_key.credits_remaining -= 1
-    api_key.last_used_at = now
-
-    if api_key.credits_remaining <= 0:
+    # Deduct 1 credit atomically — prevents double-spend under concurrent workers
+    deduct_result = await db.execute(
+        update(APIKey)
+        .where(APIKey.id == api_key.id, APIKey.credits_remaining > 0)
+        .values(credits_remaining=APIKey.credits_remaining - 1, last_used_at=now)
+        .returning(APIKey.credits_remaining)
+    )
+    remaining = deduct_result.scalar_one_or_none()
+    if remaining is None:
         logger.info(f"monitor_job: key id={api_key.id} credits exhausted — pausing sub {sub.subscription_id}")
         sub.status = "paused"
+        await db.flush()
+        return
+
+    if remaining <= 0:
+        logger.info(f"monitor_job: key id={api_key.id} credits exhausted — pausing sub {sub.subscription_id}")
+        sub.status = "paused"
+        await db.flush()

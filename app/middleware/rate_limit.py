@@ -1,7 +1,12 @@
-"""Per-API-key rate limiting via Redis sliding window (1 minute)."""
+"""Per-API-key rate limiting via Redis sliding window (1 minute).
+
+Falls back to an in-memory counter when Redis is unavailable (fail-closed).
+"""
 
 import logging
 import time
+from collections import defaultdict
+from threading import Lock
 
 from fastapi import HTTPException, status
 
@@ -14,6 +19,26 @@ RATE_LIMITS: dict[str, int | None] = {
     "unlimited": 300,
     "monitor": None,
 }
+
+# In-memory fallback: {rate_key: count}. Cleared per-bucket automatically.
+_fallback_counts: dict[str, int] = defaultdict(int)
+_fallback_lock = Lock()
+
+
+def _fallback_check(rate_key: str, limit: int) -> None:
+    """Thread-safe in-memory rate check used when Redis is unavailable."""
+    with _fallback_lock:
+        _fallback_counts[rate_key] += 1
+        count = _fallback_counts[rate_key]
+    if count > limit:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "error": f"Rate limit exceeded: {limit} requests/minute",
+                "code": "RATE_LIMITED",
+            },
+            headers={"Retry-After": "60"},
+        )
 
 
 async def check_rate_limit(api_key_id: int, tier: str) -> None:
@@ -45,5 +70,6 @@ async def check_rate_limit(api_key_id: int, tier: str) -> None:
     except HTTPException:
         raise
     except Exception as e:
-        # Redis unavailable → fail open (don't block legitimate requests)
-        logger.warning(f"Rate limit check skipped (Redis error): {e}")
+        # Redis unavailable → use in-memory fallback (fail-closed, not open)
+        logger.warning(f"Rate limit Redis error — using in-memory fallback: {type(e).__name__}")
+        _fallback_check(rate_key, limit)

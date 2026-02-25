@@ -10,6 +10,18 @@ class ScanRequest(BaseModel):
     scan_type: Literal["single", "deep"] = "single"
     callback_url: Optional[str] = None
 
+    @field_validator("endpoints")
+    @classmethod
+    def validate_endpoints(cls, v: Optional[List[str]]) -> Optional[List[str]]:
+        if v is None:
+            return v
+        if len(v) > 50:
+            raise ValueError("Maximum 50 endpoints per request")
+        for url in v:
+            if len(url) > 2048:
+                raise ValueError("URL exceeds maximum length of 2048 characters")
+        return v
+
     @model_validator(mode="after")
     def must_have_source(self):
         if not self.endpoints and not self.skill_url:
