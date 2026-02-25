@@ -32,7 +32,6 @@ class Settings(BaseSettings):
     stripe_price_unlimited: str = ""
 
     abuseipdb_api_key: str = ""
-    whois_api_key: str = ""
     deepseek_api_key: str = ""
     anthropic_api_key: str = ""  # fallback when DeepSeek unavailable
 

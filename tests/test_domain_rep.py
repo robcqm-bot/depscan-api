@@ -1,14 +1,16 @@
-"""Unit tests for domain_rep service — mocks httpx and Redis."""
+"""Unit tests for domain_rep service — uses python-whois (no API key required)."""
 
+import asyncio
 import json
 import pytest
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from app.services.domain_rep import get_domain_rep, _parse_age_days, _extract_domain
+from app.services.domain_rep import get_domain_rep, _extract_domain, _whois_lookup_sync
 
 
 # ---------------------------------------------------------------------------
-# Helper / unit tests
+# _extract_domain unit tests
 # ---------------------------------------------------------------------------
 
 def test_extract_domain_strips_www():
@@ -23,144 +25,118 @@ def test_extract_domain_invalid():
     assert _extract_domain("not-a-url") is None
 
 
-def test_parse_age_days_valid_date():
-    # Use a fixed date far in the past to guarantee positive days
-    days = _parse_age_days("2010-01-01")
-    assert days is not None and days > 3000
+# ---------------------------------------------------------------------------
+# _whois_lookup_sync unit tests (no I/O — mocks whois.whois)
+# ---------------------------------------------------------------------------
+
+def test_whois_lookup_sync_valid_date():
+    """Successful whois response with a single creation_date."""
+    mock_whois = MagicMock()
+    mock_whois.creation_date = datetime(2010, 1, 1, tzinfo=timezone.utc)
+
+    with patch.dict("sys.modules", {"whois": MagicMock(whois=MagicMock(return_value=mock_whois))}):
+        result = _whois_lookup_sync("example.com")
+
+    assert result["age_days"] is not None and result["age_days"] > 3000
+    assert result["owner_changed"] is None
 
 
-def test_parse_age_days_iso_datetime():
-    days = _parse_age_days("2010-01-01T00:00:00")
-    assert days is not None and days > 3000
+def test_whois_lookup_sync_list_of_dates():
+    """When creation_date is a list, use the earliest."""
+    mock_whois = MagicMock()
+    mock_whois.creation_date = [
+        datetime(2015, 6, 1, tzinfo=timezone.utc),
+        datetime(2010, 1, 1, tzinfo=timezone.utc),  # earliest
+    ]
+
+    with patch.dict("sys.modules", {"whois": MagicMock(whois=MagicMock(return_value=mock_whois))}):
+        result = _whois_lookup_sync("example.com")
+
+    assert result["age_days"] is not None and result["age_days"] > 3000
 
 
-def test_parse_age_days_none():
-    assert _parse_age_days(None) is None
+def test_whois_lookup_sync_none_date():
+    """When creation_date is None, returns age_days=None."""
+    mock_whois = MagicMock()
+    mock_whois.creation_date = None
 
+    with patch.dict("sys.modules", {"whois": MagicMock(whois=MagicMock(return_value=mock_whois))}):
+        result = _whois_lookup_sync("example.com")
 
-def test_parse_age_days_invalid_string():
-    assert _parse_age_days("not-a-date") is None
+    assert result == {"age_days": None, "owner_changed": None}
 
 
 # ---------------------------------------------------------------------------
-# Async integration tests
+# get_domain_rep async integration tests
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_get_domain_rep_no_api_key():
-    """No whois_api_key → silent fallback with None values."""
+async def test_get_domain_rep_cache_hit():
+    """Cached value is returned without hitting WHOIS servers."""
+    cached_data = json.dumps({"age_days": 500, "owner_changed": None})
+    with patch("app.services.domain_rep.get_cached", new=AsyncMock(return_value=cached_data)):
+        result = await get_domain_rep("https://example.com")
+
+    assert result["age_days"] == 500
+    assert result["owner_changed"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_domain_rep_valid_response():
+    """Successful WHOIS lookup → correct age_days, owner_changed=None."""
+    mock_result = {"age_days": 5000, "owner_changed": None}
+
     with (
         patch("app.services.domain_rep.get_cached", new=AsyncMock(return_value=None)),
-        patch("app.services.domain_rep.get_settings") as mock_settings,
+        patch("app.services.domain_rep.set_cached", new=AsyncMock()),
+        patch("app.services.domain_rep.asyncio.wait_for", new=AsyncMock(return_value=mock_result)),
     ):
-        settings = MagicMock()
-        settings.whois_api_key = ""
-        mock_settings.return_value = settings
+        result = await get_domain_rep("https://example.com")
 
+    assert result["age_days"] == 5000
+    assert result["owner_changed"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_domain_rep_owner_changed_always_none():
+    """owner_changed is always None — python-whois has no historical data."""
+    mock_result = {"age_days": 1000, "owner_changed": None}
+
+    with (
+        patch("app.services.domain_rep.get_cached", new=AsyncMock(return_value=None)),
+        patch("app.services.domain_rep.set_cached", new=AsyncMock()),
+        patch("app.services.domain_rep.asyncio.wait_for", new=AsyncMock(return_value=mock_result)),
+    ):
+        result = await get_domain_rep("https://example.com")
+
+    assert result["owner_changed"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_domain_rep_timeout():
+    """WHOIS timeout falls back silently to None values."""
+    async def raise_timeout(*args, **kwargs):
+        raise asyncio.TimeoutError()
+
+    with (
+        patch("app.services.domain_rep.get_cached", new=AsyncMock(return_value=None)),
+        patch("app.services.domain_rep.asyncio.wait_for", side_effect=raise_timeout),
+    ):
         result = await get_domain_rep("https://example.com")
 
     assert result == {"age_days": None, "owner_changed": None}
 
 
 @pytest.mark.asyncio
-async def test_get_domain_rep_cache_hit():
-    """Cached value is returned immediately without hitting the API."""
-    cached_data = json.dumps({"age_days": 500, "owner_changed": False})
-    with patch("app.services.domain_rep.get_cached", new=AsyncMock(return_value=cached_data)):
-        result = await get_domain_rep("https://example.com")
-
-    assert result["age_days"] == 500
-    assert result["owner_changed"] is False
-
-
-@pytest.mark.asyncio
-async def test_get_domain_rep_valid_response():
-    """Successful whoisxmlapi.com response is parsed correctly."""
-    api_response = {
-        "WhoisRecord": {
-            "createdDate": "2010-03-15",
-            "registrant": {"organization": "Example Corp"},
-        }
-    }
-    mock_response = MagicMock()
-    mock_response.json.return_value = api_response
-    mock_response.raise_for_status = MagicMock()
-
-    mock_client = AsyncMock()
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-    mock_client.__aexit__ = AsyncMock(return_value=False)
-    mock_client.get = AsyncMock(return_value=mock_response)
+async def test_get_domain_rep_whois_error():
+    """Any WHOIS error falls back silently to None values."""
+    async def raise_error(*args, **kwargs):
+        raise Exception("connection refused")
 
     with (
         patch("app.services.domain_rep.get_cached", new=AsyncMock(return_value=None)),
-        patch("app.services.domain_rep.set_cached", new=AsyncMock()),
-        patch("app.services.domain_rep.get_settings") as mock_settings,
-        patch("app.services.domain_rep.httpx.AsyncClient", return_value=mock_client),
+        patch("app.services.domain_rep.asyncio.wait_for", side_effect=raise_error),
     ):
-        settings = MagicMock()
-        settings.whois_api_key = "test_key_123"
-        mock_settings.return_value = settings
-
-        result = await get_domain_rep("https://example.com")
-
-    assert result["age_days"] is not None and result["age_days"] > 3000
-    assert result["owner_changed"] is None  # registrant org only in one place → no change detected
-
-
-@pytest.mark.asyncio
-async def test_get_domain_rep_owner_changed_flag():
-    """Differing registrant orgs between registrant and registryData → owner_changed=True."""
-    api_response = {
-        "WhoisRecord": {
-            "createdDate": "2015-06-01",
-            "registrant": {"organization": "New Owner Corp"},
-            "registryData": {"registrant": {"organization": "Original Owner LLC"}},
-        }
-    }
-    mock_response = MagicMock()
-    mock_response.json.return_value = api_response
-    mock_response.raise_for_status = MagicMock()
-
-    mock_client = AsyncMock()
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-    mock_client.__aexit__ = AsyncMock(return_value=False)
-    mock_client.get = AsyncMock(return_value=mock_response)
-
-    with (
-        patch("app.services.domain_rep.get_cached", new=AsyncMock(return_value=None)),
-        patch("app.services.domain_rep.set_cached", new=AsyncMock()),
-        patch("app.services.domain_rep.get_settings") as mock_settings,
-        patch("app.services.domain_rep.httpx.AsyncClient", return_value=mock_client),
-    ):
-        settings = MagicMock()
-        settings.whois_api_key = "test_key_123"
-        mock_settings.return_value = settings
-
-        result = await get_domain_rep("https://example.com")
-
-    assert result["owner_changed"] is True
-
-
-@pytest.mark.asyncio
-async def test_get_domain_rep_api_timeout():
-    """Network timeout falls back silently to None values."""
-    import httpx as _httpx
-
-    mock_client = AsyncMock()
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-    mock_client.__aexit__ = AsyncMock(return_value=False)
-    mock_client.get = AsyncMock(side_effect=_httpx.TimeoutException("timeout"))
-
-    with (
-        patch("app.services.domain_rep.get_cached", new=AsyncMock(return_value=None)),
-        patch("app.services.domain_rep.set_cached", new=AsyncMock()),
-        patch("app.services.domain_rep.get_settings") as mock_settings,
-        patch("app.services.domain_rep.httpx.AsyncClient", return_value=mock_client),
-    ):
-        settings = MagicMock()
-        settings.whois_api_key = "test_key_123"
-        mock_settings.return_value = settings
-
         result = await get_domain_rep("https://example.com")
 
     assert result == {"age_days": None, "owner_changed": None}
@@ -168,6 +144,6 @@ async def test_get_domain_rep_api_timeout():
 
 @pytest.mark.asyncio
 async def test_get_domain_rep_invalid_url():
-    """URL without a hostname returns None values immediately."""
+    """URL without a valid hostname returns None values immediately."""
     result = await get_domain_rep("not-a-url")
     assert result == {"age_days": None, "owner_changed": None}
