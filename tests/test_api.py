@@ -87,6 +87,25 @@ def test_checkout_invalid_tier(client: TestClient):
     assert response.status_code == 422
 
 
+def test_checkout_monitor_tier_accepted(client: TestClient):
+    """monitor is now a valid tier in the checkout form (422 only for truly unknown)."""
+    # Will hit 503 because Stripe isn't configured, but NOT 422 (model validation passes)
+    response = client.post(
+        "/v1/billing/checkout",
+        json={"tier": "monitor", "quantity": 1},
+    )
+    assert response.status_code != 422
+
+
+def test_checkout_unlimited_tier_accepted(client: TestClient):
+    """unlimited is now a valid tier in the checkout form."""
+    response = client.post(
+        "/v1/billing/checkout",
+        json={"tier": "unlimited", "quantity": 1},
+    )
+    assert response.status_code != 422
+
+
 def test_webhook_without_signature(client: TestClient):
     response = client.post(
         "/v1/webhook/billing",

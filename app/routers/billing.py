@@ -1,4 +1,10 @@
-"""Billing router: Stripe checkout creation and webhook handling."""
+"""Billing router: Stripe checkout creation and webhook handling.
+
+Tiers:
+  single / deep  → one-time payment  (mode="payment")
+  monitor        → $5/skill/month    (mode="subscription", 500 credits/month)
+  unlimited      → $49/month         (mode="subscription", 999_999 credits/month)
+"""
 
 import hashlib
 import logging
@@ -6,7 +12,7 @@ import secrets
 
 import stripe
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -17,9 +23,21 @@ from app.models.scan import CheckoutRequest, CheckoutResponse
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-PRICE_BY_TIER = {
-    "single": "stripe_price_single",
-    "deep": "stripe_price_deep",
+# Maps tier → settings attribute name for the Stripe price ID
+_PRICE_BY_TIER: dict[str, str] = {
+    "single":    "stripe_price_single",
+    "deep":      "stripe_price_deep",
+    "monitor":   "stripe_price_monitor",
+    "unlimited": "stripe_price_unlimited",
+}
+
+# Tiers that use Stripe subscription billing (recurring)
+_SUBSCRIPTION_TIERS: set[str] = {"monitor", "unlimited"}
+
+# Credits allocated on checkout / monthly renewal
+_CREDITS_BY_TIER: dict[str, int] = {
+    "monitor":   500,       # ~4 scans/day × 30 days × buffer per subscription
+    "unlimited": 999_999,   # effectively unlimited
 }
 
 
@@ -33,25 +51,26 @@ async def create_checkout(
     request: CheckoutRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """Create a payment session and return a pending API key."""
+    """Create a Stripe checkout session and return a pending API key.
+
+    - single / deep:      one-time payment, credits = quantity
+    - monitor / unlimited: subscription payment, credits allocated by tier
+    """
     settings = get_settings()
     _init_stripe()
 
-    price_attr = PRICE_BY_TIER.get(request.tier)
-    if not price_attr:
-        raise HTTPException(
-            status_code=400,
-            detail={"error": "Invalid tier", "code": "INVALID_TIER"},
-        )
-
-    price_id = getattr(settings, price_attr, "")
+    price_attr = _PRICE_BY_TIER.get(request.tier)
+    price_id = getattr(settings, price_attr, "") if price_attr else ""
     if not price_id or price_id == "price_xxx":
         raise HTTPException(
             status_code=503,
             detail={"error": "Payment not configured", "code": "PAYMENT_NOT_CONFIGURED"},
         )
 
-    # Pre-generate API key (returned to client immediately; activates after payment)
+    is_subscription = request.tier in _SUBSCRIPTION_TIERS
+    credits = _CREDITS_BY_TIER.get(request.tier, request.quantity)
+
+    # Pre-generate API key (activates after payment completes)
     raw_key = f"dsk_live_{secrets.token_urlsafe(32)}"
     key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
 
@@ -65,18 +84,33 @@ async def create_checkout(
     await db.flush()
 
     try:
-        session = stripe.checkout.Session.create(
-            payment_method_types=["card"],
-            line_items=[{"price": price_id, "quantity": request.quantity}],
-            mode="payment",
-            success_url="https://depscan.net/success?session_id={CHECKOUT_SESSION_ID}",
-            cancel_url="https://depscan.net/cancel",
-            metadata={
-                "api_key_id": str(api_key.id),
-                "credits": str(request.quantity),
-                "tier": request.tier,
-            },
-        )
+        if is_subscription:
+            session = stripe.checkout.Session.create(
+                payment_method_types=["card"],
+                line_items=[{"price": price_id, "quantity": 1}],
+                mode="subscription",
+                success_url="https://depscan.net/success?session_id={CHECKOUT_SESSION_ID}",
+                cancel_url="https://depscan.net/cancel",
+                metadata={
+                    "api_key_id": str(api_key.id),
+                    "tier": request.tier,
+                    "credits": str(credits),
+                },
+            )
+        else:
+            session = stripe.checkout.Session.create(
+                payment_method_types=["card"],
+                line_items=[{"price": price_id, "quantity": request.quantity}],
+                mode="payment",
+                success_url="https://depscan.net/success?session_id={CHECKOUT_SESSION_ID}",
+                cancel_url="https://depscan.net/cancel",
+                metadata={
+                    "api_key_id": str(api_key.id),
+                    "credits": str(request.quantity),
+                    "tier": request.tier,
+                },
+            )
+
         api_key.stripe_session_id = session.id
         await db.commit()
 
@@ -87,7 +121,7 @@ async def create_checkout(
 
     except stripe.StripeError as e:
         await db.rollback()
-        logger.error(f"Stripe error creating checkout: {e}")
+        logger.error("Stripe error creating checkout for tier=%s: %s", request.tier, e)
         raise HTTPException(
             status_code=503,
             detail={"error": "Payment provider error", "code": "PAYMENT_ERROR"},
@@ -100,7 +134,14 @@ async def stripe_webhook(
     stripe_signature: str = Header(None, alias="stripe-signature"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Internal webhook — not part of the public API."""
+    """Internal Stripe webhook — not part of the public API.
+
+    Handles:
+      checkout.session.completed     → activate key (one-time + subscription first payment)
+      invoice.payment_succeeded      → replenish credits on recurring renewal
+      invoice.payment_failed         → log warning
+      customer.subscription.deleted  → deactivate key
+    """
     settings = get_settings()
     _init_stripe()
 
@@ -116,54 +157,136 @@ async def stripe_webhook(
             detail={"error": "Invalid signature", "code": "INVALID_SIGNATURE"},
         )
     except Exception as e:
-        logger.error(f"Webhook payload error: {e}")
+        logger.error("Webhook payload error: %s", e)
         raise HTTPException(
             status_code=400,
             detail={"error": "Invalid payload", "code": "INVALID_PAYLOAD"},
         )
 
     event_type = event["type"]
-    logger.info(f"Stripe event received: {event_type}")
+    logger.info("Stripe event received: %s", event_type)
 
     if event_type == "checkout.session.completed":
-        session = event["data"]["object"]
-        metadata = session.get("metadata", {}) or {}
-        try:
-            api_key_id = int(metadata.get("api_key_id", 0))
-            credits = int(metadata.get("credits", 0))
-        except (ValueError, TypeError):
-            logger.error(f"Stripe webhook: invalid metadata types — {metadata}")
-            return {"received": True}
+        await _handle_checkout_completed(event["data"]["object"], db)
 
-        if api_key_id <= 0 or credits <= 0 or credits > 10_000:
-            logger.error(f"Stripe webhook: out-of-range values api_key_id={api_key_id} credits={credits}")
-            return {"received": True}
-
-        result = await db.execute(
-            select(APIKey).where(APIKey.id == api_key_id)
-        )
-        api_key = result.scalar_one_or_none()
-        if api_key:
-            api_key.status = "active"
-            api_key.credits_remaining += credits
-            api_key.stripe_customer_id = session.get("customer")
-            await db.commit()
-            logger.info(f"API key {api_key_id} activated — {credits} credits added")
+    elif event_type == "invoice.payment_succeeded":
+        await _handle_invoice_payment_succeeded(event["data"]["object"], db)
 
     elif event_type == "invoice.payment_failed":
         customer = event["data"]["object"].get("customer", "unknown")
         logger.warning("stripe_payment_failed customer=%s", customer)
 
     elif event_type == "customer.subscription.deleted":
-        customer_id = event["data"]["object"].get("customer")
-        if customer_id:
-            result = await db.execute(
-                select(APIKey).where(APIKey.stripe_customer_id == customer_id)
-            )
-            api_key = result.scalar_one_or_none()
-            if api_key:
-                api_key.status = "inactive"
-                await db.commit()
-                logger.info(f"API key deactivated for customer {customer_id}")
+        await _handle_subscription_deleted(event["data"]["object"], db)
 
     return {"received": True}
+
+
+async def _handle_checkout_completed(session: dict, db: AsyncSession) -> None:
+    """Activate API key after successful checkout (one-time or subscription)."""
+    metadata = session.get("metadata", {}) or {}
+    mode = session.get("mode", "payment")
+
+    try:
+        api_key_id = int(metadata.get("api_key_id", 0))
+        credits = int(metadata.get("credits", 0))
+    except (ValueError, TypeError):
+        logger.error("checkout.session.completed: invalid metadata — %s", metadata)
+        return
+
+    if api_key_id <= 0 or credits <= 0 or credits > 1_000_000:
+        logger.error(
+            "checkout.session.completed: out-of-range values api_key_id=%s credits=%s",
+            api_key_id, credits,
+        )
+        return
+
+    result = await db.execute(select(APIKey).where(APIKey.id == api_key_id))
+    api_key = result.scalar_one_or_none()
+    if not api_key:
+        logger.error("checkout.session.completed: api_key_id=%s not found", api_key_id)
+        return
+
+    api_key.status = "active"
+    api_key.credits_remaining += credits
+    api_key.stripe_customer_id = session.get("customer")
+
+    if mode == "subscription":
+        # Store subscription ID for future invoice lookups
+        api_key.stripe_subscription_id = session.get("subscription")
+
+    await db.commit()
+    logger.info(
+        "api_key_activated id=%s tier=%s credits=%s mode=%s",
+        api_key_id, api_key.tier, credits, mode,
+    )
+
+
+async def _handle_invoice_payment_succeeded(invoice: dict, db: AsyncSession) -> None:
+    """Replenish credits on monthly subscription renewal.
+
+    Skips the first invoice (billing_reason=subscription_create) because
+    checkout.session.completed already handled it.
+    """
+    billing_reason = invoice.get("billing_reason", "")
+    if billing_reason == "subscription_create":
+        # First payment — already handled by checkout.session.completed
+        return
+
+    customer_id = invoice.get("customer")
+    subscription_id = invoice.get("subscription")
+
+    if not customer_id and not subscription_id:
+        logger.warning("invoice.payment_succeeded: no customer or subscription id")
+        return
+
+    # Lookup by subscription_id first (more specific), fall back to customer_id
+    stmt = select(APIKey).where(
+        or_(
+            APIKey.stripe_subscription_id == subscription_id,
+            APIKey.stripe_customer_id == customer_id,
+        )
+    )
+    result = await db.execute(stmt)
+    api_key = result.scalar_one_or_none()
+
+    if not api_key:
+        logger.warning(
+            "invoice.payment_succeeded: no key found for customer=%s sub=%s",
+            customer_id, subscription_id,
+        )
+        return
+
+    if api_key.tier not in _SUBSCRIPTION_TIERS:
+        return  # not a subscription tier — nothing to replenish
+
+    replenish = _CREDITS_BY_TIER[api_key.tier]
+    api_key.credits_remaining = replenish   # reset to full allocation (not additive)
+    api_key.status = "active"               # reactivate if it was paused on payment failure
+    await db.commit()
+    logger.info(
+        "subscription_renewal key_id=%s tier=%s credits_replenished=%s reason=%s",
+        api_key.id, api_key.tier, replenish, billing_reason,
+    )
+
+
+async def _handle_subscription_deleted(subscription: dict, db: AsyncSession) -> None:
+    """Deactivate key when Stripe subscription is cancelled."""
+    customer_id = subscription.get("customer")
+    subscription_id = subscription.get("id")
+
+    stmt = select(APIKey).where(
+        or_(
+            APIKey.stripe_subscription_id == subscription_id,
+            APIKey.stripe_customer_id == customer_id,
+        )
+    )
+    result = await db.execute(stmt)
+    api_key = result.scalar_one_or_none()
+    if api_key:
+        api_key.status = "inactive"
+        await db.commit()
+        logger.info(
+            "subscription_deleted key_id=%s customer=%s",
+            api_key.id, customer_id,
+        )

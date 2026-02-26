@@ -1,8 +1,29 @@
 Alembic migrations for DepScan API.
 
-Fase 0 uses create_all() on startup — no migrations needed.
-For production upgrades, initialize alembic:
+Alembic is fully configured. The initial migration (001) captures the complete
+schema for Fases 0-3 including the stripe_subscription_id column added in Fase 2.
 
-    alembic init migrations
-    alembic revision --autogenerate -m "initial schema"
+== First deploy (fresh database) ==
+
+    # Apply all migrations to an empty database
     alembic upgrade head
+
+== Development (SQLite / test DB) ==
+
+    # create_all() is still called at startup as a fallback for dev/test environments
+    # that don't run alembic.
+
+== Adding a new migration ==
+
+    alembic revision --autogenerate -m "describe what changed"
+    alembic upgrade head
+
+== Rollback ==
+
+    alembic downgrade -1      # one step back
+    alembic downgrade base    # full rollback (drops all tables)
+
+== Check current revision ==
+
+    alembic current
+    alembic history --verbose

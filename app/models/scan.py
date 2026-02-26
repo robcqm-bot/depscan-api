@@ -53,7 +53,7 @@ class ScanResponse(BaseModel):
     scan_id: str
     skill: Optional[str] = None
     overall_score: int
-    status: Literal["SAFE", "CAUTION", "RISK", "CRITICAL"]
+    status: Literal["SAFE", "CAUTION", "RISK", "CRITICAL", "PENDING"]
     endpoints: List[EndpointResult]
     recommendation: Literal["SAFE_TO_INSTALL", "REVIEW_BEFORE_INSTALL", "DO_NOT_INSTALL"]
     scan_type: str
@@ -111,8 +111,8 @@ class MonitorHistoryResponse(BaseModel):
 
 
 class CheckoutRequest(BaseModel):
-    tier: Literal["single", "deep"] = "single"
-    quantity: int = 10
+    tier: Literal["single", "deep", "monitor", "unlimited"] = "single"
+    quantity: int = 10  # only used for single/deep (one-time credit purchase)
 
     @field_validator("quantity")
     @classmethod

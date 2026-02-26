@@ -74,7 +74,10 @@ async def get_api_key(
             detail={"error": "API key inactive", "code": "KEY_INACTIVE"},
         )
 
-    if api_key.credits_remaining <= 0:
+    # Monitor tier: management endpoints (subscribe/history/unsubscribe) don't consume
+    # credits — only the background job does. Skip the credit gate for this tier so users
+    # can manage their subscriptions even when credits are low between renewals.
+    if api_key.tier != "monitor" and api_key.credits_remaining <= 0:
         raise HTTPException(
             status_code=status.HTTP_402_PAYMENT_REQUIRED,
             detail={"error": "Insufficient credits", "code": "CREDITS_EXHAUSTED"},

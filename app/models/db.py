@@ -58,6 +58,7 @@ class APIKey(Base):
     credits_remaining = Column(Integer, nullable=False, default=0)
     stripe_customer_id = Column(String(255), nullable=True)
     stripe_session_id = Column(String(255), nullable=True)
+    stripe_subscription_id = Column(String(255), nullable=True, index=True)
     # "pending" → awaiting payment; "active" → usable; "inactive" → suspended
     status = Column(String(20), nullable=False, default="pending")
     created_at = Column(

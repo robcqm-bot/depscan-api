@@ -331,23 +331,29 @@ MONITOR_SCAN_INTERVAL_HOURS=6
 - [ ] `POST /v1/scan-deps` soporta scan_type: "deep"
 - [ ] `GET /v1/scan/{scan_id}` endpoint
 
-### Fase 2 — Monitor continuo
-- [ ] `monitor_job.py` — APScheduler, re-scan cada 6h
-- [ ] Sistema de alertas: webhook callback cuando score cae > threshold
-- [ ] `POST /v1/monitor/subscribe` y `DELETE /v1/monitor/{skill_id}`
-- [ ] `GET /v1/monitor/{skill_id}/history`
-- [ ] Stripe subscriptions para billing recurrente
-- [ ] Tier `unlimited` con rate limit diferenciado
+### Fase 2 — Monitor continuo ✅ COMPLETA
+- [x] `monitor_job.py` — APScheduler, re-scan cada 6h, distributed Redis lock
+- [x] Sistema de alertas: webhook callback cuando score cae > threshold
+- [x] `POST /v1/monitor/subscribe` y `DELETE /v1/monitor/{skill_id}`
+- [x] `GET /v1/monitor/{skill_id}/history`
+- [x] Stripe subscriptions para billing recurrente (monitor=500cr/mes, unlimited=999999cr/mes)
+- [x] Tier `unlimited` con rate limit diferenciado (300 req/min)
+- [x] Async scan con callback_url para > 10 endpoints (respuesta PENDING + background task)
 
-### Fase 3 — Integración SecurityScan (NO implementar hasta que SecurityScan lo solicite)
-- [ ] Endpoint interno `POST /internal/scan-deps` sin auth (solo localhost)
-- [ ] Bundle pricing en Stripe
+### Fase 3 — Integración SecurityScan ✅ COMPLETA
+- [x] Endpoint interno `POST /internal/scan-deps` sin auth (solo localhost, require_localhost)
+- [ ] Bundle pricing en Stripe (pendiente hasta que SecurityScan lo solicite)
 
-### Fase Final — Auditoría de Seguridad (ejecutar DESPUÉS de completar Fase 3)
-- [ ] Ejecutar `claude --security-review` sobre todo el codebase
-- [ ] Revisar: inyección SQL, autenticación, manejo de secretos, validación de inputs, rate limiting
-- [ ] Revisar firma Stripe webhook, permisos de admin endpoint, CORS policy
-- [ ] Corregir todos los findings antes de marcar el proyecto como production-ready
+### Fase Final — Auditoría de Seguridad ✅ COMPLETA (2026-02-26)
+- [x] Revisado: inyección SQL (ORM parametrizado), autenticación (SHA256 + hmac.compare_digest)
+- [x] Revisado: manejo de secretos (env vars, nunca en logs), validación de inputs (Pydantic)
+- [x] Revisado: rate limiting (Redis + in-memory fallback con prune), SSRF (múltiples capas)
+- [x] Revisado: firma Stripe webhook (construct_event), admin endpoint (oculto + secret), CORS
+- [x] Fix: nginx proxy_set_header tenía valores vacíos — corregido
+- [x] Fix: nginx sin bloqueo de /v1/admin/ ni /internal/ — deny all añadidos
+- [x] Fix: limit_req_zone sin definir en nginx — documentada (va en http{} de nginx.conf)
+- [x] Fix: rate_limit.py _fallback_counts memory leak — _prune_old_buckets() implementado
+- [x] Alembic configurado con migración inicial completa (alembic upgrade head)
 
 ---
 

@@ -8,14 +8,16 @@ import secrets
 import time
 import uuid
 from datetime import datetime, timezone
+from typing import List
+from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, Header
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Header
 from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.database import get_db
+from app.database import get_db, get_session_maker
 from app.dependencies import get_api_key
 from app.middleware.rate_limit import check_rate_limit
 from app.models.db import APIKey, EndpointResultDB, Scan
@@ -23,12 +25,16 @@ from app.models.scan import AIInsight, EndpointResult, ScanRequest, ScanResponse
 from app.services import scorer
 from app.services.ai_insights import get_insight_generator
 from app.services.checker import run_scan
-from app.services.extractor import extract_urls
+from app.services.extractor import extract_urls, validate_public_url
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 VERSION = "0.1.0"
+
+# Scans with more endpoints than this threshold are processed asynchronously
+# when the caller provides a callback_url.
+_ASYNC_THRESHOLD = 10
 
 
 @router.get("/v1/health")
@@ -39,6 +45,7 @@ async def health():
 @router.post("/v1/scan-deps", response_model=ScanResponse)
 async def scan_deps(
     request: ScanRequest,
+    background_tasks: BackgroundTasks,
     api_key: APIKey = Depends(get_api_key),
     db: AsyncSession = Depends(get_db),
 ):
@@ -60,8 +67,26 @@ async def scan_deps(
             detail={"error": "Maximum 50 endpoints per scan", "code": "TOO_MANY_URLS"},
         )
 
+    # Validate callback_url for SSRF before any credit deduction
+    callback_url = request.callback_url
+    if callback_url:
+        parsed_cb = urlparse(callback_url)
+        if parsed_cb.scheme not in ("http", "https"):
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "callback_url must use http or https scheme", "code": "INVALID_CALLBACK_URL"},
+            )
+        try:
+            validate_public_url(callback_url)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": f"callback_url blocked: {exc}", "code": "INVALID_CALLBACK_URL"},
+            )
+
+    use_async = len(urls) > _ASYNC_THRESHOLD and bool(callback_url)
     scan_id = f"dep_{uuid.uuid4().hex}"
-    start_time = time.monotonic()
+    now = datetime.now(timezone.utc)
 
     # Create scan record
     scan = Scan(
@@ -69,15 +94,55 @@ async def scan_deps(
         api_key_id=api_key.id,
         skill_url=request.skill_url,
         scan_type=request.scan_type,
-        created_at=datetime.now(timezone.utc),
+        created_at=now,
     )
     db.add(scan)
     await db.flush()
 
-    # Run all checks concurrently
+    if use_async:
+        # Deduct 1 credit upfront for async scans — prevents abuse and ensures
+        # the user has sufficient balance before we queue the work.
+        deduct_result = await db.execute(
+            update(APIKey)
+            .where(APIKey.id == api_key.id, APIKey.credits_remaining > 0)
+            .values(
+                credits_remaining=APIKey.credits_remaining - 1,
+                last_used_at=now,
+            )
+            .returning(APIKey.credits_remaining)
+        )
+        if deduct_result.scalar_one_or_none() is None:
+            raise HTTPException(
+                status_code=402,
+                detail={"error": "Insufficient credits", "code": "CREDITS_EXHAUSTED"},
+            )
+        await db.commit()
+
+        background_tasks.add_task(
+            _run_async_scan,
+            scan_id=scan_id,
+            urls=urls,
+            scan_type=request.scan_type,
+            callback_url=callback_url,
+        )
+
+        return ScanResponse(
+            scan_id=scan_id,
+            skill=request.skill_url,
+            overall_score=0,
+            status="PENDING",
+            endpoints=[],
+            recommendation="REVIEW_BEFORE_INSTALL",
+            scan_type=request.scan_type,
+            timestamp=now,
+            processing_time_ms=0,
+        )
+
+    # --- Synchronous path ---
+    start_time = time.monotonic()
     endpoint_results = await run_scan(urls, request.scan_type)
 
-    # Deduct one credit atomically — prevents double-spend under concurrent requests
+    # Deduct 1 credit atomically — prevents double-spend under concurrent requests
     deduct_result = await db.execute(
         update(APIKey)
         .where(APIKey.id == api_key.id, APIKey.credits_remaining > 0)
@@ -93,19 +158,16 @@ async def scan_deps(
             detail={"error": "Insufficient credits", "code": "CREDITS_EXHAUSTED"},
         )
 
-    # Calculate overall score
     scores = [r.score for r in endpoint_results]
     overall = scorer.calculate_overall_score(scores)
     processing_ms = int((time.monotonic() - start_time) * 1000)
 
-    # Update scan record
     scan.overall_score = overall
     scan.scan_status = scorer.overall_status(overall)
     scan.recommendation = scorer.recommendation(overall)
     scan.completed_at = datetime.now(timezone.utc)
     scan.processing_time_ms = processing_ms
 
-    # Persist endpoint results
     for r in endpoint_results:
         db.add(EndpointResultDB(
             scan_id=scan.id,
@@ -124,7 +186,6 @@ async def scan_deps(
 
     await db.commit()
 
-    # Optional AI insight — uses DeepSeek if key is configured, Claude as fallback
     ai_insight = None
     insight_data = await get_insight_generator().analyze(
         endpoints=endpoint_results,
@@ -149,6 +210,110 @@ async def scan_deps(
         processing_time_ms=processing_ms,
         ai_insight=ai_insight,
     )
+
+
+async def _run_async_scan(
+    scan_id: str,
+    urls: List[str],
+    scan_type: str,
+    callback_url: str,
+) -> None:
+    """Background task: run a full scan, update the DB record, and POST result to callback_url.
+
+    Credit was already deducted before this task was queued.
+    """
+    import httpx
+
+    start_time = time.monotonic()
+    session_maker = get_session_maker()
+
+    try:
+        endpoint_results = await run_scan(urls, scan_type)
+    except Exception as exc:
+        logger.error("async_scan failed scan_id=%s: %s", scan_id, exc)
+        return
+
+    scores = [r.score for r in endpoint_results]
+    overall = scorer.calculate_overall_score(scores)
+    processing_ms = int((time.monotonic() - start_time) * 1000)
+    completed_at = datetime.now(timezone.utc)
+
+    async with session_maker() as db:
+        try:
+            result = await db.execute(select(Scan).where(Scan.scan_id == scan_id))
+            scan = result.scalar_one_or_none()
+            if scan is None:
+                logger.error("async_scan: scan_id=%s not found in DB", scan_id)
+                return
+
+            scan.overall_score = overall
+            scan.scan_status = scorer.overall_status(overall)
+            scan.recommendation = scorer.recommendation(overall)
+            scan.completed_at = completed_at
+            scan.processing_time_ms = processing_ms
+
+            for r in endpoint_results:
+                db.add(EndpointResultDB(
+                    scan_id=scan.id,
+                    url=r.url,
+                    status=r.status,
+                    latency_ms=r.latency_ms,
+                    ssl_expires_days=r.ssl_expires_days,
+                    ssl_valid=r.ssl_valid,
+                    domain_age_days=r.domain_age_days,
+                    domain_owner_changed=r.domain_owner_changed,
+                    abuse_score=r.abuse_score,
+                    in_blacklist=r.in_blacklist,
+                    flags=json.dumps(r.flags),
+                    score=r.score,
+                ))
+
+            await db.commit()
+        except Exception as exc:
+            logger.error("async_scan: DB update failed scan_id=%s: %s", scan_id, exc)
+            await db.rollback()
+            return
+
+    ai_insight = None
+    insight_data = await get_insight_generator().analyze(
+        endpoints=endpoint_results,
+        overall_score=overall,
+        scan_id=scan_id,
+    )
+    if insight_data:
+        try:
+            ai_insight = AIInsight(**insight_data)
+        except Exception:
+            pass
+
+    response_payload = ScanResponse(
+        scan_id=scan_id,
+        skill=None,
+        overall_score=overall,
+        status=scorer.overall_status(overall),
+        endpoints=endpoint_results,
+        recommendation=scorer.recommendation(overall),
+        scan_type=scan_type,
+        timestamp=completed_at,
+        processing_time_ms=processing_ms,
+        ai_insight=ai_insight,
+    )
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=5.0, read=15.0, write=10.0, pool=5.0),
+        ) as client:
+            resp = await client.post(
+                callback_url,
+                content=response_payload.model_dump_json(),
+                headers={"Content-Type": "application/json", "User-Agent": "DepScan/1.0"},
+            )
+            if resp.is_success:
+                logger.info("async_scan callback delivered scan_id=%s status=%s", scan_id, resp.status_code)
+            else:
+                logger.warning("async_scan callback non-2xx scan_id=%s status=%s", scan_id, resp.status_code)
+    except Exception as exc:
+        logger.warning("async_scan callback failed scan_id=%s: %s", scan_id, type(exc).__name__)
 
 
 @router.get("/v1/scan/{scan_id}", response_model=ScanResponse)
@@ -179,7 +344,20 @@ async def get_scan(
             detail={"error": "Not your scan", "code": "FORBIDDEN"},
         )
 
-    # Reconstruct EndpointResult list from DB rows
+    # Scan queued but not yet completed (async path)
+    if scan.scan_status is None:
+        return ScanResponse(
+            scan_id=scan.scan_id,
+            skill=scan.skill_url,
+            overall_score=0,
+            status="PENDING",
+            endpoints=[],
+            recommendation="REVIEW_BEFORE_INSTALL",
+            scan_type=scan.scan_type,
+            timestamp=scan.created_at,
+            processing_time_ms=0,
+        )
+
     endpoints = [
         EndpointResult(
             url=row.url,
@@ -201,7 +379,7 @@ async def get_scan(
         scan_id=scan.scan_id,
         skill=scan.skill_url,
         overall_score=scan.overall_score or 0,
-        status=scan.scan_status or "UNKNOWN",
+        status=scan.scan_status,
         endpoints=endpoints,
         recommendation=scan.recommendation or "REVIEW_BEFORE_INSTALL",
         scan_type=scan.scan_type,
@@ -224,8 +402,6 @@ async def admin_create_key(
 ):
     """Create an active API key for testing/admin use. Protected by X-Admin-Secret header."""
     settings = get_settings()
-    # Constant-time comparison to prevent timing attacks.
-    # Deny immediately if no secret is provided in the request.
     if not x_admin_secret:
         raise HTTPException(status_code=403, detail={"error": "Forbidden", "code": "FORBIDDEN"})
     provided = x_admin_secret.encode()
