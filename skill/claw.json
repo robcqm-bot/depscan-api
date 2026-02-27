@@ -1,0 +1,14 @@
+{
+  "name": "depscan",
+  "version": "1.0.0",
+  "description": "Verify the health of a skill's external dependencies before installing. Checks uptime, SSL validity, domain reputation, abuse reports, and blacklists. Returns a trust score and a SAFE_TO_INSTALL / REVIEW_BEFORE_INSTALL / DO_NOT_INSTALL verdict.",
+  "author": "depscan",
+  "license": "MIT",
+  "permissions": ["network"],
+  "entry": "instructions.md",
+  "tags": ["security", "safety", "dependencies", "health", "uptime", "ssl", "verification", "skills", "clawhub"],
+  "models": ["claude-*", "gpt-*", "gemini-*"],
+  "minOpenClawVersion": "0.8.0",
+  "homepage": "https://depscan.net",
+  "repository": "https://github.com/robcqm-bot/depscan-api"
+}
