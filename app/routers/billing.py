@@ -99,7 +99,7 @@ async def create_checkout(
         else:
             session = stripe.checkout.Session.create(
                 payment_method_types=["card"],
-                line_items=[{"price": price_id, "quantity": request.quantity}],
+                line_items=[{"price": price_id, "quantity": 1}],
                 mode="payment",
                 success_url="https://depscan.net/success?session_id={CHECKOUT_SESSION_ID}",
                 cancel_url="https://depscan.net/cancel",
