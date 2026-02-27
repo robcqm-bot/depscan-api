@@ -1,7 +1,7 @@
 """Internal router — Fase 3.
 
-POST /internal/scan-deps — endpoint para uso exclusivo de SecurityScan API
-  (mismo servidor, 127.0.0.1). Sin autenticación, sin deducción de créditos.
+POST /internal/scan-deps — endpoint interno para uso desde localhost.
+  Sin autenticación, sin deducción de créditos.
 """
 
 import json
@@ -32,7 +32,7 @@ async def internal_scan_deps(
     _: None = Depends(require_localhost),
     db: AsyncSession = Depends(get_db),
 ):
-    """Scan interno para SecurityScan. Solo accesible desde localhost.
+    """Scan interno. Solo accesible desde localhost.
 
     Comportamiento idéntico a POST /v1/scan-deps pero:
     - Sin autenticación (no requiere API key)

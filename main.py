@@ -79,6 +79,72 @@ def create_app() -> FastAPI:
     app.include_router(monitor_router.router)
     app.include_router(internal_router.router)
 
+    @app.get("/v1/quickstart", tags=["quickstart"])
+    def quickstart():
+        return {
+            "service": "DepScan API",
+            "description": "Dependency health checking for AI agent skills.",
+            "base_url": "https://depscan.net",
+            "authentication": {
+                "header": "Authorization: Bearer <api_key>",
+                "key_format": "dsk_live_...",
+                "note": "API key is shown ONCE at checkout — save it before completing payment.",
+            },
+            "steps": [
+                {
+                    "step": 1,
+                    "action": "Get an API key",
+                    "method": "POST",
+                    "endpoint": "/v1/billing/checkout",
+                    "body": {
+                        "tier": "single_starter",
+                    },
+                    "tiers": {
+                        "single_starter": "25 credits — MXN $25 (one-time)",
+                        "single_pro": "100 credits — MXN $80 (one-time)",
+                        "single_business": "500 credits — MXN $299 (one-time)",
+                        "deep_starter": "10 credits — MXN $30 (one-time)",
+                        "deep_pro": "50 credits — MXN $120 (one-time)",
+                        "deep_business": "200 credits — MXN $449 (one-time)",
+                        "monitor": "500 credits/month — MXN $199/month",
+                        "unlimited": "999,999 credits/month — MXN $999/month",
+                    },
+                    "response": {
+                        "checkout_url": "Open this URL to complete payment",
+                        "api_key": "Save this immediately — not retrievable after checkout",
+                    },
+                },
+                {
+                    "step": 2,
+                    "action": "Scan endpoints",
+                    "method": "POST",
+                    "endpoint": "/v1/scan-deps",
+                    "headers": {"Authorization": "Bearer dsk_live_..."},
+                    "body": {
+                        "endpoints": ["https://api.example.com"],
+                        "scan_type": "single",
+                    },
+                    "scan_types": {
+                        "single": "Uptime + SSL + blacklist (1 credit per endpoint)",
+                        "deep": "Single + WHOIS + AbuseIPDB + redirect chain (1 credit per endpoint)",
+                    },
+                    "response_fields": {
+                        "overall_score": "0-100 trust score",
+                        "status": "SAFE | CAUTION | RISK | CRITICAL",
+                        "recommendation": "SAFE_TO_INSTALL | REVIEW_BEFORE_INSTALL | DO_NOT_INSTALL",
+                        "endpoints[].score": "Individual endpoint score 0-100",
+                        "endpoints[].flags": "NEW_DOMAIN | SSL_EXPIRING | ABUSE_REPORTED | IN_BLACKLIST | ...",
+                    },
+                },
+            ],
+            "common_errors": {
+                "KEY_PENDING": "Payment not completed — finish checkout before using the key",
+                "INSUFFICIENT_CREDITS": "Buy more credits at /v1/billing/checkout",
+                "402": "Out of credits",
+                "401": "Missing or invalid Authorization header",
+            },
+        }
+
     return app
 
 

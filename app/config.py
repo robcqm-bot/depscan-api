@@ -26,8 +26,12 @@ class Settings(BaseSettings):
 
     stripe_secret_key: str = ""
     stripe_webhook_secret: str = ""
-    stripe_price_single: str = ""
-    stripe_price_deep: str = ""
+    stripe_price_single_starter: str = ""
+    stripe_price_single_pro: str = ""
+    stripe_price_single_business: str = ""
+    stripe_price_deep_starter: str = ""
+    stripe_price_deep_pro: str = ""
+    stripe_price_deep_business: str = ""
     stripe_price_monitor: str = ""
     stripe_price_unlimited: str = ""
 

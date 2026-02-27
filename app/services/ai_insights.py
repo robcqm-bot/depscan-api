@@ -3,7 +3,7 @@
 Fase 0: module present and ready; called optionally when AI keys are configured.
 Fase 2+: integrated into Monitor tier alerts and deep-scan narrative summaries.
 
-Follows the same DeepSeek-primary / Claude-fallback pattern as SecurityScan API.
+Uses DeepSeek as primary LLM with Claude as fallback.
 """
 
 import json

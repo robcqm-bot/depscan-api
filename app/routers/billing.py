@@ -1,9 +1,10 @@
 """Billing router: Stripe checkout creation and webhook handling.
 
 Tiers:
-  single / deep  → one-time payment  (mode="payment")
-  monitor        → $5/skill/month    (mode="subscription", 500 credits/month)
-  unlimited      → $49/month         (mode="subscription", 999_999 credits/month)
+  single_starter / single_pro / single_business  → one-time payment
+  deep_starter   / deep_pro   / deep_business    → one-time payment
+  monitor        → $9.99/month  (subscription, 500 credits/month)
+  unlimited      → $49/month    (subscription, 999_999 credits/month)
 """
 
 import hashlib
@@ -23,22 +24,25 @@ from app.models.scan import CheckoutRequest, CheckoutResponse
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# Maps tier → settings attribute name for the Stripe price ID
-_PRICE_BY_TIER: dict[str, str] = {
-    "single":    "stripe_price_single",
-    "deep":      "stripe_price_deep",
-    "monitor":   "stripe_price_monitor",
-    "unlimited": "stripe_price_unlimited",
-}
-
 # Tiers that use Stripe subscription billing (recurring)
 _SUBSCRIPTION_TIERS: set[str] = {"monitor", "unlimited"}
 
-# Credits allocated on checkout / monthly renewal
+# Credits allocated on checkout / monthly renewal for every tier
 _CREDITS_BY_TIER: dict[str, int] = {
-    "monitor":   500,       # ~4 scans/day × 30 days × buffer per subscription
-    "unlimited": 999_999,   # effectively unlimited
+    "single_starter":  25,
+    "single_pro":      100,
+    "single_business": 500,
+    "deep_starter":    10,
+    "deep_pro":        50,
+    "deep_business":   200,
+    "monitor":         500,
+    "unlimited":       999_999,
 }
+
+
+def _get_price_id(tier: str, settings) -> str:
+    attr = f"stripe_price_{tier}"
+    return getattr(settings, attr, "")
 
 
 def _init_stripe() -> None:
@@ -51,16 +55,11 @@ async def create_checkout(
     request: CheckoutRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """Create a Stripe checkout session and return a pending API key.
-
-    - single / deep:      one-time payment, credits = quantity
-    - monitor / unlimited: subscription payment, credits allocated by tier
-    """
+    """Create a Stripe checkout session and return a pending API key."""
     settings = get_settings()
     _init_stripe()
 
-    price_attr = _PRICE_BY_TIER.get(request.tier)
-    price_id = getattr(settings, price_attr, "") if price_attr else ""
+    price_id = _get_price_id(request.tier, settings)
     if not price_id or price_id == "price_xxx":
         raise HTTPException(
             status_code=503,
@@ -68,7 +67,7 @@ async def create_checkout(
         )
 
     is_subscription = request.tier in _SUBSCRIPTION_TIERS
-    credits = _CREDITS_BY_TIER.get(request.tier, request.quantity)
+    credits = _CREDITS_BY_TIER[request.tier]
 
     # Pre-generate API key (activates after payment completes)
     raw_key = f"dsk_live_{secrets.token_urlsafe(32)}"
@@ -106,8 +105,8 @@ async def create_checkout(
                 cancel_url="https://depscan.net/cancel",
                 metadata={
                     "api_key_id": str(api_key.id),
-                    "credits": str(request.quantity),
                     "tier": request.tier,
+                    "credits": str(credits),
                 },
             )
 

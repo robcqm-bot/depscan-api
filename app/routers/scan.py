@@ -306,7 +306,7 @@ async def _run_async_scan(
             resp = await client.post(
                 callback_url,
                 content=response_payload.model_dump_json(),
-                headers={"Content-Type": "application/json", "User-Agent": "DepScan/1.0"},
+                headers={"Content-Type": "application/json", "User-Agent": "Scanner/1.0"},
             )
             if resp.is_success:
                 logger.info("async_scan callback delivered scan_id=%s status=%s", scan_id, resp.status_code)

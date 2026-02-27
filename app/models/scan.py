@@ -111,15 +111,11 @@ class MonitorHistoryResponse(BaseModel):
 
 
 class CheckoutRequest(BaseModel):
-    tier: Literal["single", "deep", "monitor", "unlimited"] = "single"
-    quantity: int = 10  # only used for single/deep (one-time credit purchase)
-
-    @field_validator("quantity")
-    @classmethod
-    def quantity_in_range(cls, v: int) -> int:
-        if v < 1 or v > 10_000:
-            raise ValueError("quantity must be between 1 and 10,000")
-        return v
+    tier: Literal[
+        "single_starter", "single_pro", "single_business",
+        "deep_starter", "deep_pro", "deep_business",
+        "monitor", "unlimited",
+    ]
 
 
 class CheckoutResponse(BaseModel):
