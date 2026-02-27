@@ -13,3 +13,5 @@ build/
 htmlcov/
 *.db
 *.log
+sync-to-server.sh
+update-on-server.sh
