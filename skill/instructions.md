@@ -27,13 +27,13 @@ Response:
 ```json
 {
   "checkout_url": "https://checkout.stripe.com/...",
-  "api_key": "dsk_live_..."
+  "api_key": "dsk_live_...",
+  "note": "Save your API key now — it will not be shown again."
 }
 ```
 
 - Store `api_key` immediately as `DEPSCAN_API_KEY` — it is pre-generated and will activate after payment.
-- Complete payment at `checkout_url`.
-- Poll `GET https://depscan.net/v1/health` is not needed — the key activates automatically via webhook within seconds of payment.
+- Complete payment at `checkout_url`. The key activates automatically via webhook within seconds of payment.
 
 ### Phase 2: Scan the Skill's Dependencies
 
@@ -57,7 +57,7 @@ Or, if you already know the list of endpoints the skill calls:
 }
 ```
 
-Use `scan_type: "deep"` for a thorough check that includes WHOIS history, domain age, and AbuseIPDB lookup (costs 1 deep credit instead of 1 single credit).
+Use `scan_type: "deep"` for a thorough check that includes WHOIS history, domain age, and AbuseIPDB lookup. Deep scan credits are purchased separately (deep_starter, deep_pro, deep_business tiers).
 
 Response:
 ```json
