@@ -43,16 +43,16 @@ Complete payment once. The key is pre-generated and activates automatically via 
 
 ## Pricing
 
-| Tier | Credits | Price | Type |
-|------|---------|-------|------|
-| single_starter | 25 | one-time | Pay once |
-| single_pro | 100 | one-time | Pay once |
-| single_business | 500 | one-time | Pay once |
-| deep_starter | 10 | one-time | Pay once |
-| deep_pro | 50 | one-time | Pay once |
-| deep_business | 200 | one-time | Pay once |
-| monitor | 500/month | $9.99/month | Subscription |
-| unlimited | Unlimited | $49/month | Subscription |
+| Tier | Price (MXN) | Type |
+|------|-------------|------|
+| single_starter | $25/scan pack | One-time |
+| single_pro | $80/scan pack | One-time |
+| single_business | $299/scan pack | One-time |
+| deep_starter | $30/scan pack | One-time |
+| deep_pro | $120/scan pack | One-time |
+| deep_business | $499/scan pack | One-time |
+| monitor | $199/month | Subscription |
+| unlimited | $999/month | Subscription |
 
 Each scan costs 1 credit. Results cached 24h — rescanning the same domain within 24h costs zero credits.
 
